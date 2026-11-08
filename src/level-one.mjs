@@ -20,7 +20,7 @@ export const levelOne = {
     [868, 1191], [862, 1218], [846, 1242], [823, 1256], [796, 1261],
     [125, 1261], [97, 1255], [74, 1239], [59, 1216], [54, 1188], [54, 416],
   ],
-  sword: { damage: 10, speed: 2000, radius: 12 },
+  sword: { damage: 10, speed: 2000, routeSpeed: 1050, radius: 12 },
   enemy: { health: 10, baseSpeed: 300, speedScale: 0.5, radius: 31, leakDamage: 1 },
   cast: { moveMin: 0.12, moveMax: 0.22, charge: 0.13, return: 0.18 },
   comboWindow: 2,

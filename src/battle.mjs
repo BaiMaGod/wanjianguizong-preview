@@ -3,6 +3,7 @@ import { directions, field } from './level-one.mjs';
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
 const smooth = t => t * t * (3 - 2 * t);
+const cross = (ax, ay, bx, by) => ax * by - ay * bx;
 
 function routeFrom(points) {
   let length = 0;
@@ -18,6 +19,26 @@ function routeFrom(points) {
     at(progress) {
       const segment = segments.find(s => progress <= s.start + s.length) ?? segments.at(-1);
       return lerp(segment.a, segment.b, Math.min(1, (progress - segment.start) / segment.length));
+    },
+    entryFrom(origin, direction) {
+      let entry = null;
+      for (const segment of segments) {
+        const { a, b } = segment;
+        const edgeX = b.x - a.x;
+        const edgeY = b.y - a.y;
+        const offsetX = a.x - origin.x;
+        const offsetY = a.y - origin.y;
+        const denominator = cross(direction.x, direction.y, edgeX, edgeY);
+        if (denominator === 0) continue;
+        const along = cross(offsetX, offsetY, edgeX, edgeY) / denominator;
+        const fraction = cross(offsetX, offsetY, direction.x, direction.y) / denominator;
+        if (along < 0 || fraction < 0 || fraction > 1 || (entry && along >= entry.distance)) continue;
+        entry = { ...lerp(a, b, fraction), distance: along, progress: segment.start + fraction * segment.length };
+      }
+      return entry;
+    },
+    backToSpawn(progress) {
+      return segments.filter(segment => segment.start < progress).reverse().map(segment => segment.a);
     },
   };
 }
@@ -67,9 +88,11 @@ export class Battle {
   }
 
   addSword(spec) {
-    this.swords.set(spec.id, {
+    const sword = {
       ...spec, x: this.level.columns[spec.col], y: this.level.rows[spec.row], state: 'set',
-    });
+    };
+    sword.roadEntry = this.route.entryFrom(sword, directions[sword.direction]);
+    this.swords.set(spec.id, sword);
   }
 
   get remaining() {
@@ -116,14 +139,12 @@ export class Battle {
     return { x: sword.x - d.x * 48, y: sword.y - d.y * 48 };
   }
 
-  // The tutorial lights up as the first enemy approaches the real attack line.
+  // Light the tutorial sword while an enemy can still meet it on the reverse leg.
   get introCue() {
     const sword = this.swords.get(this.level.intro.id);
-    const enemy = this.enemies[0];
-    if (!sword || sword.state !== 'set' || !enemy) return false;
-    const flight = (sword.y - this.level.route[0][1]) / this.level.sword.speed;
-    const projectedX = enemy.x + this.enemySpeed * (this.castDuration(this.hero, sword) + flight);
-    return enemy.y === this.level.route[0][1] && Math.abs(sword.x - projectedX) <= 38;
+    if (!sword?.roadEntry || sword.state !== 'set') return false;
+    const approach = this.castDuration(this.hero, sword) + sword.roadEntry.distance / this.level.sword.speed;
+    return this.enemies.some(enemy => enemy.progress + this.enemySpeed * approach <= sword.roadEntry.progress);
   }
 
   get enemySpeed() {
@@ -188,7 +209,9 @@ export class Battle {
     this.updateCast(dt);
     for (const enemy of this.enemies) {
       enemy.previous = { x: enemy.x, y: enemy.y };
-      enemy.progress += this.enemySpeed * (this.time - Math.max(previousTime, enemy.at));
+      enemy.activeFrom = Math.min(dt, Math.max(0, enemy.at - previousTime));
+      enemy.activeUntil = Math.min(dt, enemy.activeFrom + (this.route.length - enemy.progress) / this.enemySpeed);
+      enemy.progress += this.enemySpeed * (dt - enemy.activeFrom);
       Object.assign(enemy, this.route.at(enemy.progress));
     }
     this.projectiles = this.projectiles.filter(shot => this.updateShot(shot, dt));
@@ -237,7 +260,17 @@ export class Battle {
     }
     const sword = action.sword;
     this.swords.delete(sword.id);
-    this.projectiles.push({ x: sword.x, y: sword.y, id: sword.id, direction: sword.direction });
+    const direction = directions[sword.direction];
+    const { x, y, id, roadEntry } = sword;
+    const edge = {
+      x: direction.x ? (direction.x < 0 ? -55 : field.width + 55) : x,
+      y: direction.y ? (direction.y < 0 ? -55 : field.height + 55) : y,
+    };
+    this.projectiles.push({
+      x, y, id, roadEntry, angle: direction.angle * Math.PI / 180, nextPoint: 0, distance: 0,
+      waypoints: roadEntry ? [roadEntry, ...this.route.backToSpawn(roadEntry.progress)] : [edge],
+      trail: [{ x, y, distance: 0 }],
+    });
     this.stats.shots++;
     this.feedback('launch', sword);
     const duration = this.level.cast.return;
@@ -247,14 +280,56 @@ export class Battle {
   }
 
   updateShot(shot, dt) {
-    const d = directions[shot.direction];
-    const speed = this.level.sword.speed;
-    const next = { x: shot.x + d.x * speed * dt, y: shot.y + d.y * speed * dt };
+    let elapsed = 0;
+    while (elapsed < dt && shot.nextPoint < shot.waypoints.length) {
+      const waypoint = shot.waypoints[shot.nextPoint];
+      const length = distance(shot, waypoint);
+      if (length <= 1e-8) {
+        shot.nextPoint++;
+        continue;
+      }
+      const { speed, routeSpeed = speed } = this.level.sword;
+      const velocity = shot.nextPoint === 0 ? speed : routeSpeed;
+      const legDuration = length / velocity;
+      const duration = Math.min(legDuration, dt - elapsed);
+      const next = duration === legDuration ? waypoint : lerp(shot, waypoint, duration / legDuration);
+      if (this.hitDuring(shot, next, elapsed, elapsed + duration)) return false;
+
+      shot.angle = Math.atan2(waypoint.x - shot.x, shot.y - waypoint.y);
+      shot.x = next.x;
+      shot.y = next.y;
+      shot.distance += duration * velocity;
+      shot.trail.push({ x: shot.x, y: shot.y, distance: shot.distance });
+      while (shot.trail.length > 2 && shot.trail[1].distance <= shot.distance - 160) shot.trail.shift();
+      elapsed += duration;
+      if (duration === legDuration) shot.nextPoint++;
+    }
+    if (shot.nextPoint < shot.waypoints.length) return true;
+
+    this.feedback('miss', shot.roadEntry ? shot : {
+      x: Math.max(54, Math.min(field.width - 54, shot.x)),
+      y: Math.max(277, Math.min(field.height - 277, shot.y)),
+    });
+    this.finishIntro(shot);
+    return false;
+  }
+
+  hitDuring(shot, next, start, end) {
     let target = null;
     let hitTime = Infinity;
     for (const enemy of this.enemies) {
       if (enemy.health <= 0) continue;
-      const t = contact(shot, next, enemy.previous, enemy, this.level.sword.radius + this.level.enemy.radius);
+      const from = Math.max(start, enemy.activeFrom);
+      const to = Math.min(end, enemy.activeUntil);
+      if (from > to) continue;
+      const activeDuration = enemy.activeUntil - enemy.activeFrom;
+      const enemyFrom = activeDuration ? lerp(enemy.previous, enemy, (from - enemy.activeFrom) / activeDuration) : enemy;
+      const enemyTo = activeDuration ? lerp(enemy.previous, enemy, (to - enemy.activeFrom) / activeDuration) : enemy;
+      const shotFrom = lerp(shot, next, (from - start) / (end - start));
+      const shotTo = lerp(shot, next, (to - start) / (end - start));
+      const fraction = contact(shotFrom, shotTo, enemyFrom, enemyTo, this.level.sword.radius + this.level.enemy.radius);
+      if (!Number.isFinite(fraction)) continue;
+      const t = from + (to - from) * fraction;
       if (t < hitTime) {
         hitTime = t;
         target = enemy;
@@ -267,18 +342,11 @@ export class Battle {
       this.lastHit = this.time;
       this.stats.bestCombo = Math.max(this.stats.bestCombo, this.combo);
       if (target.health <= 0) this.stats.kills++;
-      this.feedback(target.health <= 0 ? 'kill' : 'hit', lerp(shot, next, hitTime));
+      this.feedback(target.health <= 0 ? 'kill' : 'hit', lerp(shot, next, (hitTime - start) / (end - start)));
       this.finishIntro(shot);
-      return false;
+      return true;
     }
-    if (next.x < -55 || next.x > field.width + 55 || next.y < -55 || next.y > 1380) {
-      const edge = { x: Math.max(54, Math.min(868, shot.x)), y: Math.max(277, Math.min(1261, shot.y)) };
-      this.feedback('miss', edge);
-      this.finishIntro(shot);
-      return false;
-    }
-    Object.assign(shot, next);
-    return true;
+    return false;
   }
 
   finishIntro(shot) {

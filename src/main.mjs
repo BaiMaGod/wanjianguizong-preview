@@ -166,16 +166,19 @@ function paint() {
   ctx.clearRect(0, 0, field.width, field.height);
   if (battle.introCue) {
     const intro = battle.swords.get('intro');
+    const entry = intro.roadEntry;
+    const arrow = battle.route.at(Math.max(0, entry.progress - 125));
     ctx.save();
     ctx.setLineDash([7, 10]);
     ctx.strokeStyle = '#c8f6ffbb';
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(intro.x, intro.y - 43);
-    ctx.lineTo(intro.x, levelOne.route[0][1]);
+    ctx.lineTo(entry.x, entry.y);
+    ctx.lineTo(arrow.x, arrow.y);
     ctx.stroke();
     ctx.restore();
-    ring(intro.x, levelOne.route[0][1], 27, '#d2f6ff', .65);
+    ring(entry.x, entry.y, 27, '#d2f6ff', .65);
   }
 
   for (const enemy of [...battle.enemies].sort((a, b) => a.y - b.y)) {
@@ -204,18 +207,22 @@ function paint() {
   }
 
   for (const shot of battle.projectiles) {
-    const d = directions[shot.direction];
-    const tail = { x: shot.x - d.x * 160, y: shot.y - d.y * 160 };
-    const trail = ctx.createLinearGradient(tail.x, tail.y, shot.x, shot.y);
-    trail.addColorStop(0, '#63ceff00');
-    trail.addColorStop(1, '#c8f6ff');
-    ctx.strokeStyle = trail;
-    ctx.lineWidth = 12;
-    ctx.beginPath();
-    ctx.moveTo(tail.x, tail.y);
-    ctx.lineTo(shot.x, shot.y);
-    ctx.stroke();
-    sprite(artwork.sword, shot.x, shot.y, 37, 102, d.angle * Math.PI / 180);
+    const [first, second] = shot.trail;
+    if (second) {
+      const offset = Math.max(0, shot.distance - 160 - first.distance) / (second.distance - first.distance);
+      const tail = { x: first.x + (second.x - first.x) * offset, y: first.y + (second.y - first.y) * offset };
+      const gradient = ctx.createLinearGradient(tail.x, tail.y, shot.x, shot.y);
+      gradient.addColorStop(0, '#63ceff00');
+      gradient.addColorStop(1, '#c8f6ff');
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 12;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tail.x, tail.y);
+      for (const point of shot.trail.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.stroke();
+    }
+    sprite(artwork.sword, shot.x, shot.y, 37, 102, shot.angle);
   }
   for (const effect of battle.effects) paintEffect(effect);
 }
@@ -280,12 +287,12 @@ function renderSwords() {
 function renderGuide() {
   const recent = battle.effects.at(-1)?.type;
   let step = '识剑 1/4';
-  let message = '观察敌人，剑座亮起时点击出剑';
+  let message = '敌人出现后，点击亮起的飞剑';
   if (battle.targeting) {
     step = '破阵符';
     message = recent === 'invalid' ? '这把剑没有挡路，请选金圈标记的飞剑' : '选择挡路飞剑，或点击下方取消';
   } else if (!battle.formationShown && !battle.remaining) {
-    message = '御剑中 · 看剑锋与敌人是否相遇';
+    message = '御剑中 · 飞剑入道后逆行迎敌';
   } else if (battle.introCue) {
     message = '现在点击亮起的飞剑';
   } else if (battle.formationShown) {
@@ -294,7 +301,7 @@ function renderGuide() {
       message = '守住防线，等剩余敌潮结束';
     } else if (battle.unlockedRear && battle.swords.get('rear')?.state !== 'set') {
       step = '识时 4/4';
-      message = '看准敌人经过攻击线的时机再出剑';
+      message = '选一把入道后能逆行迎上敌人的剑';
     } else if (battle.unlockedRear || battle.sawBlock) {
       step = '解阵 3/4';
       message = battle.unlockedRear ? '后方飞剑已解锁，点击即可预约' : '先点前方金色飞剑，再点后方';
@@ -322,7 +329,7 @@ function renderOverlay() {
   byId('talisman').inert = !overlay.hidden;
   if (overlay.hidden) return;
   const copy = {
-    ready: ['护山试炼 · 第一关', '初试剑阵', '看准剑尖方向，御剑守住山门。', '入阵'],
+    ready: ['护山试炼 · 第一关', '初试剑阵', '飞剑沿剑尖出阵，入道后逆行迎敌。', '入阵'],
     paused: ['护山试炼 · 第一关', '战斗暂停', '继续当前战斗，或重新开始本关。', '继续战斗'],
     victory: ['护山试炼 · 第一关', '护山成功', '剑阵已清，山门安然。'],
     defeat: ['护山试炼 · 第一关', '护山失守', '防线生命耗尽。重新入阵可再次挑战。'],
